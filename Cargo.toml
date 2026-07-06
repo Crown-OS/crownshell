@@ -1,0 +1,30 @@
+[package]
+name = "crownshell"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+battery = "0.7.8"
+chrono = "0.4.45"
+tracing = "0.1.44"
+log = "0.4"
+env_logger = "0.11"
+
+smithay-client-toolkit = { version = "0.19", features = ["calloop"] }
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+calloop = "0.13"
+calloop-wayland-source = "0.3"
+
+vello = "0.9.0"
+parley = "0.6"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+bluer = { version = "0.17.4", features = ["bluetoothd", "id", "rfcomm"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
