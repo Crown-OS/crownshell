@@ -93,11 +93,7 @@ impl App {
         Ok((connection, event_queue, app))
     }
 
-    pub fn create_window<H: SurfaceHandler + 'static>(
-        &mut self,
-        config: WindowConfig,
-        handler: H,
-    ) {
+    pub fn create_window<H: SurfaceHandler + 'static>(&mut self, config: WindowConfig, handler: H) {
         let window = Window::new(
             config,
             Box::new(handler),
