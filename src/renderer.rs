@@ -1,15 +1,16 @@
 use std::{ffi::c_void, num::NonZeroUsize, ptr::NonNull};
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use smithay_client_toolkit::shell::WaylandSurface;
 use vello::{
-    AaConfig, AaSupport, RenderParams, Renderer as VelloRenderer, RendererOptions, Scene,
     peniko::Color,
     util::{RenderContext, RenderSurface},
     wgpu::{
-        self, CompositeAlphaMode, CurrentSurfaceTexture, PresentMode, SurfaceTargetUnsafe,
+        self,
         rwh::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle},
+        CompositeAlphaMode, CurrentSurfaceTexture, PresentMode, SurfaceTargetUnsafe,
     },
+    AaConfig, AaSupport, RenderParams, Renderer as VelloRenderer, RendererOptions, Scene,
 };
 use wayland_client::{Connection, Proxy};
 
@@ -93,7 +94,8 @@ impl Renderer {
         if self.surface.config.width == width && self.surface.config.height == height {
             return;
         }
-        self.context.resize_surface(&mut self.surface, width, height);
+        self.context
+            .resize_surface(&mut self.surface, width, height);
     }
 
     pub fn surface_size(&self) -> (u32, u32) {
@@ -116,7 +118,7 @@ impl Renderer {
                     base_color: Color::TRANSPARENT,
                     width: self.surface.config.width,
                     height: self.surface.config.height,
-                    antialiasing_method: AaConfig::Area,
+                    antialiasing_method: AaConfig::Msaa16,
                 },
             )
             .map_err(|e| anyhow!("render_to_texture: {e}"))?;
@@ -125,9 +127,12 @@ impl Renderer {
         let mut encoder = device_handle
             .device
             .create_command_encoder(&Default::default());
-        self.surface
-            .blitter
-            .copy(&device_handle.device, &mut encoder, &self.surface.target_view, &surface_view);
+        self.surface.blitter.copy(
+            &device_handle.device,
+            &mut encoder,
+            &self.surface.target_view,
+            &surface_view,
+        );
         device_handle.queue.submit([encoder.finish()]);
         surface_texture.present();
         Ok(())
