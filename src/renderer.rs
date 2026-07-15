@@ -73,7 +73,7 @@ impl Renderer {
             device,
             RendererOptions {
                 use_cpu: false,
-                antialiasing_support: AaSupport::area_only(),
+                antialiasing_support: AaSupport::all(),
                 num_init_threads: NonZeroUsize::new(1),
                 pipeline_cache: None,
             },
