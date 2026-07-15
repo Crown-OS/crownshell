@@ -2,6 +2,25 @@
 name = "crownshell"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+authors = ["marvelxcodes <ramakrishnan0046@gmail.com>"]
+description = "A Rust framework for building Wayland layer shell surfaces with Vello 2D graphics."
+license = "MIT"
+repository = "https://github.com/Crown-OS/crownshell"
+homepage = "https://github.com/Crown-OS/crownshell"
+documentation = "https://docs.rs/crownshell"
+readme = "README.md"
+keywords = [
+  "crownos",
+  "wayland",
+  "layer-shell",
+  "vello",
+  "gui",
+  "graphics",
+  "shell",
+  "layershell",
+]
+categories = ["gui", "graphics", "rendering", "os::linux-apis"]
 
 [dependencies]
 anyhow = "1.0.102"
