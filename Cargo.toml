@@ -10,16 +10,7 @@ repository = "https://github.com/Crown-OS/crownshell"
 homepage = "https://github.com/Crown-OS/crownshell"
 documentation = "https://docs.rs/crownshell"
 readme = "README.md"
-keywords = [
-  "crownos",
-  "wayland",
-  "layer-shell",
-  "vello",
-  "gui",
-  "graphics",
-  "shell",
-  "layershell",
-]
+keywords = ["crownos", "wayland", "vello", "gui", "layershell"]
 categories = ["gui", "graphics", "rendering", "os::linux-apis"]
 
 [dependencies]
