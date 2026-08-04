@@ -13,9 +13,24 @@ impl CompositorHandler for App {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: i32,
+        surface: &wl_surface::WlSurface,
+        new_factor: i32,
     ) {
+        let App {
+            compositor_state,
+            qh,
+            text_cx,
+            windows,
+            ..
+        } = self;
+        let Some(window) = windows.iter_mut().find(|w| w.layer.wl_surface() == surface) else {
+            return;
+        };
+        // The buffer scale only reaches the compositor on the next commit, so
+        // repaint at the new density right away.
+        if window.set_scale(new_factor) {
+            window.request_frame(compositor_state, qh, text_cx);
+        }
     }
 
     fn transform_changed(
@@ -37,11 +52,12 @@ impl CompositorHandler for App {
         let App {
             compositor_state,
             qh,
+            text_cx,
             windows,
             ..
         } = self;
         if let Some(window) = windows.iter_mut().find(|w| w.layer.wl_surface() == surface) {
-            window.on_frame(compositor_state, qh);
+            window.on_frame(compositor_state, qh, text_cx);
         }
     }
 

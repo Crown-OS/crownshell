@@ -54,16 +54,19 @@ impl DataDeviceHandler for App {
             let App {
                 compositor_state,
                 qh,
+                text_cx,
                 windows,
                 ..
             } = self;
             let window = &mut windows[window_idx];
             let ctx = SurfaceCtx {
                 size: (window.width, window.height),
+                scale: window.scale as f64,
                 compositor_state,
                 layer: &window.layer,
                 bg_effect_surface: window.bg_effect_surface.as_ref(),
                 qh,
+                text: text_cx,
             };
             let dofr = HandlerDragOffer {
                 mime_types: &mime_types,
@@ -270,19 +273,22 @@ fn route_drag_motion(app: &mut App, surface: &WlSurface, x: f64, y: f64) {
     let App {
         compositor_state,
         qh,
+        text_cx,
         windows,
         ..
     } = app;
     let window = &mut windows[idx];
     let ctx = SurfaceCtx {
         size: (window.width, window.height),
+        scale: window.scale as f64,
         compositor_state,
         layer: &window.layer,
         bg_effect_surface: window.bg_effect_surface.as_ref(),
         qh,
+        text: &mut *text_cx,
     };
     if window.handler.on_drag_motion(x, y, ctx) {
-        window.request_frame(compositor_state, qh);
+        window.request_frame(compositor_state, qh, text_cx);
     }
 }
 
@@ -297,19 +303,22 @@ fn route_drag_leave(app: &mut App, surface: &WlSurface) {
     let App {
         compositor_state,
         qh,
+        text_cx,
         windows,
         ..
     } = app;
     let window = &mut windows[idx];
     let ctx = SurfaceCtx {
         size: (window.width, window.height),
+        scale: window.scale as f64,
         compositor_state,
         layer: &window.layer,
         bg_effect_surface: window.bg_effect_surface.as_ref(),
         qh,
+        text: &mut *text_cx,
     };
     if window.handler.on_drag_leave(ctx) {
-        window.request_frame(compositor_state, qh);
+        window.request_frame(compositor_state, qh, text_cx);
     }
 }
 
@@ -324,16 +333,19 @@ fn deliver_drop(app: &mut App, read: PendingRead) {
     let App {
         compositor_state,
         qh,
+        text_cx,
         windows,
         ..
     } = app;
     let window = &mut windows[idx];
     let ctx = SurfaceCtx {
         size: (window.width, window.height),
+        scale: window.scale as f64,
         compositor_state,
         layer: &window.layer,
         bg_effect_surface: window.bg_effect_surface.as_ref(),
         qh,
+        text: &mut *text_cx,
     };
     let drop = DropPayload {
         mime_type: read.mime_type,
@@ -342,7 +354,7 @@ fn deliver_drop(app: &mut App, read: PendingRead) {
         y: read.pos.1,
     };
     if window.handler.on_drop(drop, ctx) {
-        window.request_frame(compositor_state, qh);
+        window.request_frame(compositor_state, qh, text_cx);
     }
 }
 

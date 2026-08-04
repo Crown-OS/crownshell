@@ -2,6 +2,7 @@ pub mod app;
 pub mod handler;
 pub mod predule;
 pub mod renderer;
+pub mod text;
 pub mod window;
 
 mod wayland;
@@ -13,10 +14,12 @@ use calloop_wayland_source::WaylandSource;
 pub use app::App;
 pub use handler::{DragOffer, DropPayload, SurfaceCtx, SurfaceHandler};
 pub use renderer::Renderer;
+pub use text::{draw_layout, ColorBrush, Text, TextContext, TextLayout, TextStyle};
 pub use window::{Window, WindowConfig, DEFAULT_TICK_INTERVAL};
 
 pub use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer};
-pub use vello::{self, peniko, Scene};
+pub use vello::{self, kurbo, peniko, Scene};
+pub use parley;
 
 pub fn run<F>(setup: F) -> Result<()>
 where

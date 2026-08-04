@@ -8,9 +8,11 @@ This crate abstracts the Wayland boilerplate. Just configure the surface you wan
 
 - **Layer shell windows** via `wlr-layer-shell`, with the usual controls: layer, anchor, size, exclusive zone and keyboard interactivity.
 - **Vello rendering** wired up to the surface — you just push into a `Scene`.
+- **Text** shaped and laid out by [Parley](https://github.com/linebender/parley), using your system fonts, with measurement so you can align around it.
 - **Input handling** for pointer events (enter, leave, motion, press, release) and keyboard.
 - **Drag and drop** with mime-type negotiation and payload delivery.
 - **Background blur** through the `ext-background-effect-v1` protocol, when the compositor supports it.
+- **HiDPI** handled for you — you draw in logical pixels, crownshell renders into a correctly-sized physical buffer.
 - **Ticks and frame callbacks** so animations and periodic redraws are easy.
 - **Multiple windows** in a single app, driven by one `calloop` event loop.
 
@@ -74,11 +76,87 @@ This `run` sets up the Wayland connection, dispatches events, calls your `paint`
 - **`App`** — the top-level context. You get one inside the `run` closure. Use `app.create_window(...)` to attach surfaces.
 - **`WindowConfig`** — a struct describing where the surface sits and how it behaves.
 - **`SurfaceHandler`** — the trait you implement. `paint` is the only required method. Everything else (pointer, keyboard, drag-and-drop, ticks, frame callbacks) has a default no-op implementation, so you override only what you need.
-- **`SurfaceCtx`** — passed into every callback. Gives you the current size and the bits you'd need to trigger a commit or set a region.
+- **`SurfaceCtx`** — passed into every callback. Gives you the current logical size, the output's `scale`, the shared `TextContext` as `ctx.text`, and the bits you'd need to trigger a commit or set a region.
+- **`Text` / `TextStyle`** — retained, measurable text. See [Text](#text).
 - **Returning `bool` from event callbacks** — return `true` to ask for a redraw, `false` if nothing visual changed. That keeps you from repainting on every mouse move by default.
 
 - `on_frame` fires when the compositor is ready for the next frame — use it for smooth animation.
 - `on_tick` fires on a timer (default 1s, configurable via `WindowConfig::tick_interval`) — use it for things like clocks or battery readings that don't need per-frame updates.
+
+## Text
+
+Text is shaped and laid out with [Parley](https://github.com/linebender/parley) and drawn as glyph outlines by Vello, so it scales cleanly and picks up whatever fonts are installed on the system.
+
+A `Text` is a retained object: build it once, keep it on your handler, and update its content each frame. The layout is cached and only rebuilt when the content, style or scale actually changes, which matters because crownshell only repaints on demand.
+
+```rust
+use crownshell::predule::*;
+
+struct Bar {
+    clock: Text,
+}
+
+impl Bar {
+    fn new() -> Self {
+        Self {
+            clock: Text::new("--:--").with_style(
+                TextStyle::new("Inter, sans-serif", 16.0)
+                    .with_weight(600.0)
+                    .with_color(Color::from_rgba8(240, 240, 250, 255)),
+            ),
+        }
+    }
+}
+
+impl SurfaceHandler for Bar {
+    fn paint(&mut self, scene: &mut Scene, ctx: SurfaceCtx<'_>) {
+        self.clock.set_text("12:45");
+
+        // Measure first, so the text can be centred.
+        let size = self.clock.size(ctx.text);
+        let x = (ctx.size.0 as f64 - size.width) / 2.0;
+        let y = (ctx.size.1 as f64 - size.height) / 2.0;
+
+        self.clock.draw(ctx.text, scene, (x.round(), y.round()));
+    }
+}
+```
+
+`ctx.text` is the shared `TextContext` — the system font database plus Parley's caches. There is one per app, created for you.
+
+- **`TextStyle`** — family stack in CSS syntax (`"Inter, Noto Sans, sans-serif"`, generic families included), size, weight, italic, colour, line height and letter spacing.
+- **Measurement** — `size`, `width`, `height` and `baseline` all lay the text out on demand and hand back pixels, so you can size and align boxes around it.
+- **Custom fonts** — `ctx.text.register_font(bytes)` adds a font from memory (e.g. `include_bytes!`), so you can ship your own typeface instead of relying on what's installed.
+- **Missing families are skipped**, falling through the stack to the generic family at the end. Always end your stack with `sans-serif` or `monospace`.
+
+There is a full example in [`examples/text_bar.rs`](examples/text_bar.rs) — a top bar with a label and a live clock:
+
+```
+cargo run --example text_bar
+```
+
+Text is currently laid out and drawn as a single line, without wrapping or alignment.
+
+## HiDPI
+
+You draw in **logical pixels** and crownshell handles the rest. `ctx.size` is the logical surface size, `Text` measures and positions in logical pixels, and the whole scene is scaled into the physical buffer before it's submitted. Nothing in your `paint` changes when the display density does.
+
+Under the hood, crownshell tracks the `wl_surface` buffer scale, sets it on the surface, sizes the wgpu surface in physical pixels, and lays text out at the physical pixel density so glyphs are rasterised at their true ppem rather than upscaled. Vello folds the uniform scene scale back into the glyph size, so hinting survives.
+
+`ctx.scale` is there if you want it — for snapping to the physical pixel grid, say — but you shouldn't need it for ordinary drawing.
+
+```rust
+fn paint(&mut self, scene: &mut Scene, ctx: SurfaceCtx<'_>) {
+    // ctx.size is logical; on a 2x display the buffer behind it is twice this.
+    let (w, h) = ctx.size;
+
+    // Text is measured and placed in the same logical space.
+    let size = self.clock.size(ctx.text);
+    self.clock.draw(ctx.text, scene, (0.0, (h as f64 - size.height) / 2.0));
+}
+```
+
+Only integer buffer scales are supported today, which is what `wl_surface.set_buffer_scale` accepts. On a fractionally-scaled output the compositor advertises the next integer up (a 1.25x display reports 2), so text is rendered at 2x and scaled down by the compositor — sharp, if not pixel-exact. True fractional scaling needs `wp_fractional_scale_v1`, which crownshell does not bind yet.
 
 ## Blur
 

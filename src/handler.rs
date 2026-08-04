@@ -3,14 +3,27 @@ use vello::Scene;
 use wayland_client::QueueHandle;
 use wayland_protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1;
 
-use crate::app::App;
+use crate::{app::App, text::TextContext};
 
 pub struct SurfaceCtx<'a> {
+    /// Surface size in logical pixels — the space `paint` draws in.
     pub size: (u32, u32),
+    /// Physical pixels per logical pixel on the output this surface is on.
+    ///
+    /// You rarely need this: crownshell scales the whole scene for you, and
+    /// [`Text`] already rasterises at this density. It is here for the cases
+    /// that genuinely care, such as snapping to the physical pixel grid.
+    ///
+    /// [`Text`]: crate::Text
+    pub scale: f64,
     pub compositor_state: &'a CompositorState,
     pub layer: &'a LayerSurface,
     pub bg_effect_surface: Option<&'a ExtBackgroundEffectSurfaceV1>,
     pub qh: &'a QueueHandle<App>,
+    /// Shared font database and layout caches, for use with [`Text`].
+    ///
+    /// [`Text`]: crate::Text
+    pub text: &'a mut TextContext,
 }
 
 pub struct DragOffer<'a> {

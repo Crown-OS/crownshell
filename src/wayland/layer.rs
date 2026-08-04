@@ -22,6 +22,7 @@ impl LayerShellHandler for App {
         let App {
             compositor_state,
             qh,
+            text_cx,
             windows,
             ..
         } = self;
@@ -40,7 +41,10 @@ impl LayerShellHandler for App {
         };
         window.resize(new_w, new_h);
         window.first_configure = false;
-        window.request_frame(compositor_state, qh);
+        if window.wants_blur() {
+            window.apply_blur_region(compositor_state);
+        }
+        window.request_frame(compositor_state, qh, text_cx);
     }
 }
 

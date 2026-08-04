@@ -20,6 +20,7 @@ impl PointerHandler for App {
         let App {
             compositor_state,
             qh,
+            text_cx,
             windows,
             ..
         } = self;
@@ -33,17 +34,19 @@ impl PointerHandler for App {
             let (x, y) = event.position;
             match event.kind {
                 PointerEventKind::Enter { .. } => {
-                    window.on_pointer_enter(x, y, compositor_state, qh)
+                    window.on_pointer_enter(x, y, compositor_state, qh, text_cx)
                 }
-                PointerEventKind::Leave { .. } => window.on_pointer_leave(compositor_state, qh),
+                PointerEventKind::Leave { .. } => {
+                    window.on_pointer_leave(compositor_state, qh, text_cx)
+                }
                 PointerEventKind::Motion { .. } => {
-                    window.on_pointer_motion(x, y, compositor_state, qh)
+                    window.on_pointer_motion(x, y, compositor_state, qh, text_cx)
                 }
                 PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
-                    window.on_pointer_press(x, y, compositor_state, qh)
+                    window.on_pointer_press(x, y, compositor_state, qh, text_cx)
                 }
                 PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
-                    window.on_pointer_release(x, y, compositor_state, qh)
+                    window.on_pointer_release(x, y, compositor_state, qh, text_cx)
                 }
                 _ => {}
             }

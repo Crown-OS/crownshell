@@ -8,7 +8,7 @@ use smithay_client_toolkit::{
         WaylandSurface,
     },
 };
-use vello::Scene;
+use vello::{kurbo::Affine, Scene};
 use wayland_client::{protocol::wl_output::WlOutput, QueueHandle};
 use wayland_protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1;
 
@@ -16,6 +16,7 @@ use crate::{
     app::App,
     handler::{SurfaceCtx, SurfaceHandler},
     renderer::Renderer,
+    text::TextContext,
     wayland::background_effect::BackgroundEffect,
 };
 
@@ -54,8 +55,15 @@ pub struct Window {
     pub bg_effect_surface: Option<ExtBackgroundEffectSurfaceV1>,
     pub handler: Box<dyn SurfaceHandler>,
     pub scene: Scene,
+    /// Scratch scene holding `scene` with the buffer scale applied. Unused
+    /// while the scale is 1.
+    scaled_scene: Scene,
+    /// Surface size in logical pixels, as the compositor configured it.
     pub width: u32,
     pub height: u32,
+    /// `wl_surface` buffer scale: how many physical pixels make up one logical
+    /// pixel. Always at least 1.
+    pub scale: i32,
     pub first_configure: bool,
     pub frame_pending: bool,
     pub tick_timer: Option<RegistrationToken>,
@@ -63,15 +71,24 @@ pub struct Window {
 }
 
 macro_rules! ctx {
-    ($self:ident, $compositor_state:expr, $qh:expr) => {
+    ($self:ident, $compositor_state:expr, $qh:expr, $text_cx:expr) => {{
+        // The context is shared between windows, which may sit on outputs of
+        // different densities. Point it at this surface before the handler can
+        // lay any text out — measuring in a pointer callback has to agree with
+        // what painting will produce.
+        $text_cx.set_scale($self.scale as f32);
         SurfaceCtx {
             size: ($self.width, $self.height),
+            scale: $self.scale as f64,
             compositor_state: $compositor_state,
             layer: &$self.layer,
             bg_effect_surface: $self.bg_effect_surface.as_ref(),
             qh: $qh,
+            // Reborrow so the caller can keep using its `&mut TextContext`
+            // after the handler returns.
+            text: &mut *$text_cx,
         }
-    };
+    }};
 }
 
 impl Window {
@@ -94,8 +111,7 @@ impl Window {
         );
 
         let bg_effect_surface = if config.blur {
-            background_effect
-                .map(|bg| bg.manager.get_background_effect(layer.wl_surface(), qh, ()))
+            background_effect.map(|bg| bg.manager.get_background_effect(layer.wl_surface(), qh, ()))
         } else {
             None
         };
@@ -107,8 +123,10 @@ impl Window {
             bg_effect_surface,
             handler,
             scene: Scene::new(),
+            scaled_scene: Scene::new(),
             width: initial_w,
             height: initial_h,
+            scale: 1,
             first_configure: true,
             frame_pending: false,
             tick_timer: None,
@@ -132,48 +150,112 @@ impl Window {
         self.config.blur
     }
 
-    pub fn paint(&mut self, compositor_state: &CompositorState, qh: &QueueHandle<App>) {
+    /// Size of the underlying buffer in physical pixels.
+    pub fn physical_size(&self) -> (u32, u32) {
+        let scale = self.scale.max(1) as u32;
+        (self.width * scale, self.height * scale)
+    }
+
+    /// Adopts a new `wl_surface` buffer scale, resizing the buffer to match.
+    ///
+    /// Returns `true` if the scale actually changed, in which case the caller
+    /// should request a frame — the new buffer size only reaches the
+    /// compositor on the next commit.
+    pub fn set_scale(&mut self, scale: i32) -> bool {
+        let scale = scale.max(1);
+        if self.scale == scale {
+            return false;
+        }
+        self.scale = scale;
+        self.layer.wl_surface().set_buffer_scale(scale);
+        let (physical_w, physical_h) = self.physical_size();
+        log::debug!(
+            "buffer scale {scale}: {}x{} logical, {physical_w}x{physical_h} physical",
+            self.width,
+            self.height
+        );
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.resize(physical_w, physical_h);
+        }
+        true
+    }
+
+    pub fn paint(
+        &mut self,
+        compositor_state: &CompositorState,
+        qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
+    ) {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
+
         self.scene.reset();
-        let ctx = ctx!(self, compositor_state, qh);
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
         self.handler.paint(&mut self.scene, ctx);
-        if let Err(e) = renderer.render(&self.scene) {
+
+        // Handlers draw in logical pixels; the buffer is physical.
+        let scene = if self.scale <= 1 {
+            &self.scene
+        } else {
+            self.scaled_scene.reset();
+            self.scaled_scene
+                .append(&self.scene, Some(Affine::scale(self.scale as f64)));
+            &self.scaled_scene
+        };
+
+        if let Err(e) = renderer.render(scene) {
             log::error!("render failed: {e}");
         }
     }
 
+    /// Resizes the surface. `width` and `height` are in logical pixels.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
+        let (physical_w, physical_h) = self.physical_size();
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.resize(width, height);
+            renderer.resize(physical_w, physical_h);
         }
     }
 
-    pub fn request_frame(&mut self, compositor_state: &CompositorState, qh: &QueueHandle<App>) {
+    pub fn request_frame(
+        &mut self,
+        compositor_state: &CompositorState,
+        qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
+    ) {
         if self.frame_pending {
             return;
         }
         self.frame_pending = true;
         let surface = self.layer.wl_surface().clone();
         surface.frame(qh, surface.clone());
-        self.paint(compositor_state, qh);
+        self.paint(compositor_state, qh, text_cx);
     }
 
-    pub fn on_frame(&mut self, compositor_state: &CompositorState, qh: &QueueHandle<App>) {
+    pub fn on_frame(
+        &mut self,
+        compositor_state: &CompositorState,
+        qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
+    ) {
         self.frame_pending = false;
-        let ctx = ctx!(self, compositor_state, qh);
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
         if self.handler.on_frame(ctx) {
-            self.request_frame(compositor_state, qh);
+            self.request_frame(compositor_state, qh, text_cx);
         }
     }
 
-    pub fn on_tick(&mut self, compositor_state: &CompositorState, qh: &QueueHandle<App>) {
-        let ctx = ctx!(self, compositor_state, qh);
+    pub fn on_tick(
+        &mut self,
+        compositor_state: &CompositorState,
+        qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
+    ) {
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
         if self.handler.on_tick(ctx) {
-            self.request_frame(compositor_state, qh);
+            self.request_frame(compositor_state, qh, text_cx);
         }
     }
 
@@ -183,17 +265,23 @@ impl Window {
         y: f64,
         compositor_state: &CompositorState,
         qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
     ) {
-        let ctx = ctx!(self, compositor_state, qh);
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
         if self.handler.on_pointer_enter(x, y, ctx) {
-            self.request_frame(compositor_state, qh);
+            self.request_frame(compositor_state, qh, text_cx);
         }
     }
 
-    pub fn on_pointer_leave(&mut self, compositor_state: &CompositorState, qh: &QueueHandle<App>) {
-        let ctx = ctx!(self, compositor_state, qh);
+    pub fn on_pointer_leave(
+        &mut self,
+        compositor_state: &CompositorState,
+        qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
+    ) {
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
         if self.handler.on_pointer_leave(ctx) {
-            self.request_frame(compositor_state, qh);
+            self.request_frame(compositor_state, qh, text_cx);
         }
     }
 
@@ -203,10 +291,11 @@ impl Window {
         y: f64,
         compositor_state: &CompositorState,
         qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
     ) {
-        let ctx = ctx!(self, compositor_state, qh);
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
         if self.handler.on_pointer_motion(x, y, ctx) {
-            self.request_frame(compositor_state, qh);
+            self.request_frame(compositor_state, qh, text_cx);
         }
     }
 
@@ -216,10 +305,11 @@ impl Window {
         y: f64,
         compositor_state: &CompositorState,
         qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
     ) {
-        let ctx = ctx!(self, compositor_state, qh);
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
         if self.handler.on_pointer_press(x, y, ctx) {
-            self.request_frame(compositor_state, qh);
+            self.request_frame(compositor_state, qh, text_cx);
         }
     }
 
@@ -229,10 +319,11 @@ impl Window {
         y: f64,
         compositor_state: &CompositorState,
         qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
     ) {
-        let ctx = ctx!(self, compositor_state, qh);
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
         if self.handler.on_pointer_release(x, y, ctx) {
-            self.request_frame(compositor_state, qh);
+            self.request_frame(compositor_state, qh, text_cx);
         }
     }
 
@@ -244,21 +335,11 @@ impl Window {
         Timer::from_duration(self.tick_interval())
     }
 
-    pub fn apply_blur_region(
-        &self,
-        compositor_state: &CompositorState,
-        background_effect: Option<&BackgroundEffect>,
-    ) {
+    pub fn apply_blur_region(&self, compositor_state: &CompositorState) {
         use smithay_client_toolkit::compositor::Region;
         let Some(effect_surface) = self.bg_effect_surface.as_ref() else {
             return;
         };
-        let Some(bg) = background_effect else {
-            return;
-        };
-        if !bg.supports_blur() {
-            return;
-        }
         let Ok(region) = Region::new(compositor_state) else {
             return;
         };

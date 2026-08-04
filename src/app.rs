@@ -14,6 +14,7 @@ use wayland_client::{
 
 use crate::{
     handler::SurfaceHandler,
+    text::TextContext,
     wayland::background_effect::BackgroundEffect,
     window::{Window, WindowConfig},
 };
@@ -53,6 +54,8 @@ pub struct App {
     pub qh: QueueHandle<App>,
     pub loop_handle: LoopHandle<'static, App>,
     pub tick_timer: Option<RegistrationToken>,
+    /// Font database and layout caches shared by every window.
+    pub text_cx: TextContext,
     pub windows: Vec<Window>,
     pub(crate) dnd: DndState,
     pub exit: bool,
@@ -85,6 +88,7 @@ impl App {
             qh,
             loop_handle,
             tick_timer: None,
+            text_cx: TextContext::new(),
             windows: Vec::new(),
             dnd: DndState::default(),
             exit: false,
@@ -113,7 +117,7 @@ impl App {
     pub fn apply_blur_regions(&self) {
         for window in &self.windows {
             if window.wants_blur() {
-                window.apply_blur_region(&self.compositor_state, self.background_effect.as_ref());
+                window.apply_blur_region(&self.compositor_state);
             }
         }
     }
@@ -122,11 +126,12 @@ impl App {
         let App {
             compositor_state,
             qh,
+            text_cx,
             windows,
             ..
         } = self;
         for window in windows.iter_mut() {
-            window.paint(compositor_state, qh);
+            window.paint(compositor_state, qh, text_cx);
         }
     }
 
@@ -148,11 +153,12 @@ impl App {
                 let App {
                     compositor_state,
                     qh,
+                    text_cx,
                     windows,
                     ..
                 } = app;
                 for window in windows.iter_mut() {
-                    window.on_tick(compositor_state, qh);
+                    window.on_tick(compositor_state, qh, text_cx);
                 }
                 calloop::timer::TimeoutAction::ToDuration(interval)
             });

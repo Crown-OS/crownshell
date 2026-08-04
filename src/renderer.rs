@@ -45,10 +45,13 @@ impl Renderer {
         // as `Window`. Both must outlive the Renderer, enforced by drop order in Window.
         let wgpu_surface = unsafe { context.instance.create_surface_unsafe(target)? };
 
+        // The buffer is sized in physical pixels; the layer surface is
+        // configured in logical ones.
+        let (physical_w, physical_h) = window.physical_size();
         let mut surface = pollster::block_on(context.create_render_surface(
             wgpu_surface,
-            window.width.max(1),
-            window.height.max(1),
+            physical_w.max(1),
+            physical_h.max(1),
             PresentMode::AutoVsync,
         ))
         .map_err(|e| anyhow!("create_render_surface: {e}"))?;
@@ -57,10 +60,14 @@ impl Renderer {
             .surface
             .get_capabilities(context.devices[surface.dev_id].adapter())
             .alpha_modes;
+        // Vello's fine shader writes straight (un-premultiplied) alpha to the
+        // render target (fine.wgsl divides rgb by alpha before textureStore),
+        // so the compositor must be told to interpret the surface as straight
+        // alpha — otherwise even tiny alpha values clamp to fully-lit RGB.
         let alpha_mode = [
-            CompositeAlphaMode::PreMultiplied,
             CompositeAlphaMode::PostMultiplied,
             CompositeAlphaMode::Inherit,
+            CompositeAlphaMode::PreMultiplied,
         ]
         .into_iter()
         .find(|m| alpha_caps.contains(m))
