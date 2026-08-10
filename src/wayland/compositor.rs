@@ -2,8 +2,8 @@ use smithay_client_toolkit::{
     compositor::CompositorHandler, delegate_compositor, shell::WaylandSurface,
 };
 use wayland_client::{
-    protocol::{wl_output, wl_surface},
     Connection, QueueHandle,
+    protocol::{wl_output, wl_surface},
 };
 
 use crate::app::App;

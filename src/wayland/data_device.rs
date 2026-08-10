@@ -3,10 +3,10 @@ use std::io::{BufRead, BufReader};
 use calloop::PostAction;
 use smithay_client_toolkit::{
     data_device_manager::{
+        WritePipe,
         data_device::DataDeviceHandler,
         data_offer::{DataOfferHandler, DragOffer},
         data_source::DataSourceHandler,
-        WritePipe,
     },
     delegate_data_device,
     reexports::client::protocol::{
@@ -99,14 +99,7 @@ impl DataDeviceHandler for App {
         route_drag_leave(self, &active.surface);
     }
 
-    fn motion(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &WlDataDevice,
-        x: f64,
-        y: f64,
-    ) {
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, x: f64, y: f64) {
         let Some(active) = self.dnd.active.as_mut() else {
             return;
         };
@@ -159,16 +152,18 @@ impl DataDeviceHandler for App {
             token: None,
         });
         let key = offer.clone();
-        let insert = self.loop_handle.insert_source(
-            read_pipe,
-            move |_, f, app: &mut App| {
+        let insert = self
+            .loop_handle
+            .insert_source(read_pipe, move |_, f, app: &mut App| {
                 let Some(idx) = app.dnd.pending_reads.iter().position(|p| p.offer == key) else {
                     return PostAction::Continue;
                 };
                 let file: &mut std::fs::File = unsafe { f.get_mut() };
                 let mut reader = BufReader::new(file);
                 match reader.fill_buf() {
-                    Ok(buf) if buf.is_empty() => {
+                    // An empty fill means end of stream: the source has closed
+                    // its end of the pipe, so the payload is complete.
+                    Ok([]) => {
                         let entry = app.dnd.pending_reads.remove(idx);
                         entry.offer.finish();
                         entry.offer.destroy();
@@ -194,8 +189,7 @@ impl DataDeviceHandler for App {
                         PostAction::Remove
                     }
                 }
-            },
-        );
+            });
         match insert {
             Ok(token) => {
                 if let Some(last) = self.dnd.pending_reads.last_mut() {

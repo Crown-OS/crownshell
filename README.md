@@ -162,6 +162,21 @@ Only integer buffer scales are supported today, which is what `wl_surface.set_bu
 
 If you set `blur: true` in the config and the compositor advertises `ext-background-effect-v1`, crownshell will register a blur region covering the whole surface. If the protocol isn't available it's silently skipped — your app still renders, just without the frosted-glass look.
 
+For a surface that is only partly opaque — a menu panel on a surface that covers the screen, say — set `auto_blur_region: false` and drive the region yourself with `ctx.set_blur_region(&[rect])`, so the compositor isn't blurring behind pixels you never drew.
+
+## Popups
+
+A popup is a second layer surface, not a region of the bar. See [`examples/menu_popup.rs`](examples/menu_popup.rs) for a bar with a menu that opens from it under a scale animation.
+
+The pattern it uses:
+
+- Create the popup surface on `Layer::Overlay` in `run`, next to the bar, and keep it for the life of the process. Opening it then costs one repaint rather than a wgpu surface, a set of Vello pipelines and a round of text shaping.
+- Anchor it on all four sides with `size: (0, 0)` and leave `exclusive_zone` at 0. The compositor sizes it to the usable area, so its top edge sits just below the bar, and a click anywhere outside the panel arrives as an ordinary pointer event on that surface — which is how it dismisses.
+- While it's closed, draw nothing and drop both regions: `ctx.set_input_region(&[])` makes the surface click-through, and `ctx.set_blur_region(&[])` stops the compositor blurring behind an invisible panel.
+- Draw the panel into a scratch `Scene` and `append` it under one `Affine`, so a frame of animation re-encodes draw commands without re-laying-out any text.
+- Drive frames from `on_frame`, returning `true` while the animation runs, so it's paced by the compositor's frame clock rather than a timer.
+- Share state between the bar and the popup with an `Rc<RefCell<_>>`; everything runs on one thread. A click lands on the *bar*, so the popup gets its first frame from `needs_redraw`, which is polled on every surface after each batch of events. It's the one hook that lets a handler repaint a surface other than the one an event arrived on — also what you want for a D-Bus signal or a message from a worker thread.
+
 ## Status
 
 This is early crate, built to power layershell on my own distro (CrownOS). The API will move. If you're going to use it, expect breaking changes.

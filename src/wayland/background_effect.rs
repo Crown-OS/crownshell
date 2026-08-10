@@ -1,4 +1,4 @@
-use wayland_client::{globals::GlobalList, Connection, Dispatch, QueueHandle};
+use wayland_client::{Connection, Dispatch, QueueHandle, globals::GlobalList};
 use wayland_protocols::ext::background_effect::v1::client::{
     ext_background_effect_manager_v1::{self, Capability, ExtBackgroundEffectManagerV1},
     ext_background_effect_surface_v1::{self, ExtBackgroundEffectSurfaceV1},

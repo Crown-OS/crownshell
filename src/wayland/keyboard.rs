@@ -4,11 +4,11 @@ use smithay_client_toolkit::{
     shell::WaylandSurface,
 };
 use wayland_client::{
-    protocol::{wl_keyboard::WlKeyboard, wl_surface::WlSurface},
     Connection, QueueHandle,
+    protocol::{wl_keyboard::WlKeyboard, wl_surface::WlSurface},
 };
 
-use crate::{app::App, handler::SurfaceCtx};
+use crate::app::App;
 
 impl KeyboardHandler for App {
     fn enter(
@@ -16,11 +16,33 @@ impl KeyboardHandler for App {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &WlKeyboard,
-        _: &WlSurface,
+        surface: &WlSurface,
         _: u32,
         _: &[u32],
         _: &[Keysym],
     ) {
+        // A compositor can hand focus to a surface we do not own — another
+        // client's, or one of ours that has just been torn down. Leaving the
+        // focus unset then keeps every later key event from being delivered to
+        // the wrong window.
+        let ours = self.windows.iter().any(|w| w.layer.wl_surface() == surface);
+        if !ours {
+            log::debug!("keyboard focus entered a surface we do not own");
+            self.keyboard_focus = None;
+            return;
+        }
+        self.keyboard_focus = Some(surface.clone());
+
+        let App {
+            compositor_state,
+            qh,
+            text_cx,
+            windows,
+            ..
+        } = self;
+        if let Some(window) = windows.iter_mut().find(|w| w.layer.wl_surface() == surface) {
+            window.on_keyboard_enter(compositor_state, qh, text_cx);
+        }
     }
 
     fn leave(
@@ -28,9 +50,27 @@ impl KeyboardHandler for App {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &WlKeyboard,
-        _: &WlSurface,
+        surface: &WlSurface,
         _: u32,
     ) {
+        if self.keyboard_focus.as_ref() != Some(surface) {
+            return;
+        }
+        self.keyboard_focus = None;
+        // Modifiers are only meaningful while focused; a stale set would leak
+        // into the next surface's first keypress.
+        self.modifiers = Modifiers::default();
+
+        let App {
+            compositor_state,
+            qh,
+            text_cx,
+            windows,
+            ..
+        } = self;
+        if let Some(window) = windows.iter_mut().find(|w| w.layer.wl_surface() == surface) {
+            window.on_keyboard_leave(compositor_state, qh, text_cx);
+        }
     }
 
     fn press_key(
@@ -41,42 +81,7 @@ impl KeyboardHandler for App {
         _: u32,
         event: KeyEvent,
     ) {
-        // let App {
-        //     compositor_state,
-        //     qh,
-        //     lock_windows,
-        //     windows,
-        //     ..
-        // } = self;
-        // let text = event.utf8.as_deref();
-        // let sym = event.keysym.raw();
-        // let raw = event.raw_code;
-        // for lw in lock_windows.iter_mut() {
-        //     let ctx = SurfaceCtx {
-        //         size: (lw.width, lw.height),
-        //         compositor_state,
-        //         wl_surface: &lw.wl_surface,
-        //         layer: None,
-        //         bg_effect_surface: None,
-        //         qh,
-        //     };
-        //     if lw.handler.on_key(raw, sym, text, ctx) {
-        //         lw.request_frame(compositor_state, qh);
-        //     }
-        // }
-        // for w in windows.iter_mut() {
-        //     let ctx = SurfaceCtx {
-        //         size: (w.width, w.height),
-        //         compositor_state,
-        //         wl_surface: w.layer.wl_surface(),
-        //         layer: Some(&w.layer),
-        //         bg_effect_surface: w.bg_effect_surface.as_ref(),
-        //         qh,
-        //     };
-        //     if w.handler.on_key(raw, sym, text, ctx) {
-        //         w.request_frame(compositor_state, qh);
-        //     }
-        // }
+        self.dispatch_key(&event, true, false);
     }
 
     fn release_key(
@@ -85,8 +90,9 @@ impl KeyboardHandler for App {
         _: &QueueHandle<Self>,
         _: &WlKeyboard,
         _: u32,
-        _: KeyEvent,
+        event: KeyEvent,
     ) {
+        self.dispatch_key(&event, false, false);
     }
 
     fn update_modifiers(
@@ -95,9 +101,25 @@ impl KeyboardHandler for App {
         _: &QueueHandle<Self>,
         _: &WlKeyboard,
         _: u32,
-        _: Modifiers,
+        modifiers: Modifiers,
         _: u32,
     ) {
+        self.modifiers = modifiers;
+
+        let App {
+            compositor_state,
+            qh,
+            text_cx,
+            windows,
+            keyboard_focus,
+            ..
+        } = self;
+        let Some(surface) = keyboard_focus.as_ref() else {
+            return;
+        };
+        if let Some(window) = windows.iter_mut().find(|w| w.layer.wl_surface() == surface) {
+            window.on_modifiers(modifiers, compositor_state, qh, text_cx);
+        }
     }
 }
 

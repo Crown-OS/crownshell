@@ -2,7 +2,7 @@ use smithay_client_toolkit::{
     delegate_seat,
     seat::{Capability, SeatHandler, SeatState},
 };
-use wayland_client::{protocol::wl_seat, Connection, QueueHandle};
+use wayland_client::{Connection, QueueHandle, protocol::wl_seat};
 
 use crate::app::App;
 
@@ -25,11 +25,32 @@ impl SeatHandler for App {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Pointer && self.pointer.is_none() {
-            match self.seat_state.get_pointer(qh, &seat) {
-                Ok(pointer) => self.pointer = Some(pointer),
-                Err(e) => log::warn!("failed to get pointer: {e}"),
+        match capability {
+            Capability::Pointer if self.pointer.is_none() => {
+                match self.seat_state.get_pointer(qh, &seat) {
+                    Ok(pointer) => self.pointer = Some(pointer),
+                    Err(e) => log::warn!("failed to get pointer: {e}"),
+                }
             }
+            Capability::Keyboard if self.keyboard.is_none() => {
+                // Repeat is driven by a calloop timer inside SCTK, which is why
+                // it needs our loop handle: a held key then keeps producing
+                // events without the compositor resending them, which is what
+                // a search box or a text field expects.
+                let loop_handle = self.loop_handle.clone();
+                let keyboard = self.seat_state.get_keyboard_with_repeat(
+                    qh,
+                    &seat,
+                    None,
+                    loop_handle,
+                    Box::new(|app: &mut App, _kbd, event| app.dispatch_key(&event, true, true)),
+                );
+                match keyboard {
+                    Ok(keyboard) => self.keyboard = Some(keyboard),
+                    Err(e) => log::warn!("failed to get keyboard: {e}"),
+                }
+            }
+            _ => {}
         }
     }
 
@@ -40,10 +61,19 @@ impl SeatHandler for App {
         _: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Pointer {
-            if let Some(pointer) = self.pointer.take() {
-                pointer.release();
+        match capability {
+            Capability::Pointer => {
+                if let Some(pointer) = self.pointer.take() {
+                    pointer.release();
+                }
             }
+            Capability::Keyboard => {
+                if let Some(keyboard) = self.keyboard.take() {
+                    keyboard.release();
+                }
+                self.keyboard_focus = None;
+            }
+            _ => {}
         }
     }
 

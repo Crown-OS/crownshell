@@ -1,21 +1,24 @@
 use std::time::Duration;
 
-use calloop::{timer::Timer, RegistrationToken};
+use calloop::{RegistrationToken, timer::Timer};
 use smithay_client_toolkit::{
     compositor::CompositorState,
+    seat::keyboard::Modifiers,
     shell::{
-        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface},
         WaylandSurface,
+        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface},
     },
 };
-use vello::{kurbo::Affine, Scene};
-use wayland_client::{protocol::wl_output::WlOutput, QueueHandle};
+use vello::{Scene, kurbo::Affine};
+use wayland_client::{Connection, QueueHandle, protocol::wl_output::WlOutput};
 use wayland_protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1;
 
 use crate::{
     app::App,
-    handler::{SurfaceCtx, SurfaceHandler},
-    renderer::Renderer,
+    handler::{
+        KeyPress, PointerButton, RawSurfaceHandler, ScrollDelta, SurfaceCtx, SurfaceHandler,
+    },
+    renderer::{RawRenderer, Renderer, SharedGpu},
     text::TextContext,
     wayland::background_effect::BackgroundEffect,
 };
@@ -30,6 +33,15 @@ pub struct WindowConfig {
     pub exclusive_zone: i32,
     pub keyboard_interactivity: KeyboardInteractivity,
     pub blur: bool,
+    /// Whether crownshell keeps the blur region equal to the whole surface.
+    ///
+    /// Set this to `false` when the surface is only partly opaque — a popup
+    /// that occupies a corner of a full-screen surface, say — and drive the
+    /// region yourself with [`SurfaceCtx::set_blur_region`]. Ignored unless
+    /// [`blur`](Self::blur) is set.
+    ///
+    /// [`SurfaceCtx::set_blur_region`]: crate::SurfaceCtx::set_blur_region
+    pub auto_blur_region: bool,
     pub tick_interval: Option<Duration>,
 }
 
@@ -43,14 +55,31 @@ impl Default for WindowConfig {
             exclusive_zone: 0,
             keyboard_interactivity: KeyboardInteractivity::None,
             blur: false,
+            auto_blur_region: true,
             tick_interval: None,
         }
     }
 }
 
+/// The parts specific to a window driven by a [`RawSurfaceHandler`].
+pub(crate) struct RawWindow {
+    pub handler: Box<dyn RawSurfaceHandler>,
+    // Must drop before `Window::layer`: it holds raw pointers into wl_surface.
+    pub renderer: Option<RawRenderer>,
+}
+
+/// Placeholder installed in [`Window::handler`] for raw windows, so the
+/// pointer and drag-and-drop plumbing keeps working on a single handler type.
+struct NoopSurfaceHandler;
+
+impl SurfaceHandler for NoopSurfaceHandler {
+    fn paint(&mut self, _scene: &mut Scene, _ctx: SurfaceCtx<'_>) {}
+}
+
 pub struct Window {
     // Renderer must drop before `layer`: it holds raw pointers into wl_surface.
     pub renderer: Option<Renderer>,
+    pub(crate) raw: Option<RawWindow>,
     pub layer: LayerSurface,
     pub bg_effect_surface: Option<ExtBackgroundEffectSurfaceV1>,
     pub handler: Box<dyn SurfaceHandler>,
@@ -67,6 +96,8 @@ pub struct Window {
     pub first_configure: bool,
     pub frame_pending: bool,
     pub tick_timer: Option<RegistrationToken>,
+    /// The output this window was explicitly created on, if any.
+    pub(crate) output: Option<WlOutput>,
     config: WindowConfig,
 }
 
@@ -101,6 +132,53 @@ impl Window {
         qh: &QueueHandle<App>,
         output: Option<&WlOutput>,
     ) -> Window {
+        Self::build(
+            config,
+            handler,
+            None,
+            compositor_state,
+            layer_shell,
+            background_effect,
+            qh,
+            output,
+        )
+    }
+
+    pub(crate) fn new_raw(
+        config: WindowConfig,
+        handler: Box<dyn RawSurfaceHandler>,
+        compositor_state: &CompositorState,
+        layer_shell: &LayerShell,
+        background_effect: Option<&BackgroundEffect>,
+        qh: &QueueHandle<App>,
+        output: Option<&WlOutput>,
+    ) -> Window {
+        Self::build(
+            config,
+            Box::new(NoopSurfaceHandler),
+            Some(RawWindow {
+                handler,
+                renderer: None,
+            }),
+            compositor_state,
+            layer_shell,
+            background_effect,
+            qh,
+            output,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        config: WindowConfig,
+        handler: Box<dyn SurfaceHandler>,
+        raw: Option<RawWindow>,
+        compositor_state: &CompositorState,
+        layer_shell: &LayerShell,
+        background_effect: Option<&BackgroundEffect>,
+        qh: &QueueHandle<App>,
+        output: Option<&WlOutput>,
+    ) -> Window {
         let surface = compositor_state.create_surface(qh);
         let layer = layer_shell.create_layer_surface(
             qh,
@@ -119,6 +197,7 @@ impl Window {
         let (initial_w, initial_h) = config.size;
         let window = Self {
             renderer: None,
+            raw,
             layer,
             bg_effect_surface,
             handler,
@@ -130,6 +209,7 @@ impl Window {
             first_configure: true,
             frame_pending: false,
             tick_timer: None,
+            output: output.cloned(),
             config,
         };
 
@@ -148,6 +228,58 @@ impl Window {
 
     pub fn wants_blur(&self) -> bool {
         self.config.blur
+    }
+
+    /// Whether crownshell should keep this surface's blur region in sync with
+    /// its size, as opposed to the handler owning the region.
+    pub fn wants_auto_blur_region(&self) -> bool {
+        self.config.blur && self.config.auto_blur_region
+    }
+
+    /// The output this window was explicitly created on, if any.
+    ///
+    /// `None` for windows created with [`App::create_window`] or
+    /// [`App::create_raw_window`], where the compositor picks the output.
+    ///
+    /// [`App::create_window`]: crate::App::create_window
+    /// [`App::create_raw_window`]: crate::App::create_raw_window
+    pub fn output(&self) -> Option<&WlOutput> {
+        self.output.as_ref()
+    }
+
+    /// Whether the handler is asking to repaint for a reason of its own.
+    pub fn needs_redraw(&self) -> bool {
+        match &self.raw {
+            Some(raw) => raw.handler.needs_redraw(),
+            None => self.handler.needs_redraw(),
+        }
+    }
+
+    /// Creates this window's GPU renderer if it does not exist yet. Called on
+    /// configure, so windows created at any point in the app's life — setup or
+    /// output hotplug — get their renderer as soon as the surface has a size.
+    pub(crate) fn ensure_renderer(
+        &mut self,
+        connection: &Connection,
+        raw_gpu: &mut Option<SharedGpu>,
+        qh: &QueueHandle<App>,
+    ) -> anyhow::Result<()> {
+        if let Some(raw) = &self.raw {
+            if raw.renderer.is_some() {
+                return Ok(());
+            }
+            let gpu = raw_gpu
+                .get_or_insert_with(crate::renderer::new_shared_gpu)
+                .clone();
+            let renderer = RawRenderer::new(gpu, connection, &self.layer, self.physical_size())?;
+            let scale = self.scale as f64;
+            let raw = self.raw.as_mut().expect("checked above");
+            renderer.with_ctx(scale, &self.layer, qh, |ctx| raw.handler.setup(ctx));
+            raw.renderer = Some(renderer);
+        } else if self.renderer.is_none() {
+            self.renderer = Some(Renderer::new(connection, self)?);
+        }
+        Ok(())
     }
 
     /// Size of the underlying buffer in physical pixels.
@@ -177,6 +309,9 @@ impl Window {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.resize(physical_w, physical_h);
         }
+        if let Some(renderer) = self.raw.as_mut().and_then(|raw| raw.renderer.as_mut()) {
+            renderer.resize(physical_w, physical_h);
+        }
         true
     }
 
@@ -186,6 +321,13 @@ impl Window {
         qh: &QueueHandle<App>,
         text_cx: &mut TextContext,
     ) {
+        if let Some(RawWindow { handler, renderer }) = self.raw.as_mut() {
+            if let Some(renderer) = renderer.as_mut() {
+                renderer.render(handler.as_mut(), self.scale as f64, &self.layer, qh);
+            }
+            return;
+        }
+
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
@@ -204,7 +346,11 @@ impl Window {
             &self.scaled_scene
         };
 
-        if let Err(e) = renderer.render(scene) {
+        // `blur_sigma` is in logical pixels and the buffer is physical, so the
+        // blur widens with the output's density exactly as the drawing does.
+        let blur_sigma = self.handler.blur_sigma() * self.scale.max(1) as f32;
+
+        if let Err(e) = renderer.render(scene, blur_sigma) {
             log::error!("render failed: {e}");
         }
     }
@@ -217,6 +363,9 @@ impl Window {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.resize(physical_w, physical_h);
         }
+        if let Some(renderer) = self.raw.as_mut().and_then(|raw| raw.renderer.as_mut()) {
+            renderer.resize(physical_w, physical_h);
+        }
     }
 
     pub fn request_frame(
@@ -225,7 +374,11 @@ impl Window {
         qh: &QueueHandle<App>,
         text_cx: &mut TextContext,
     ) {
-        if self.frame_pending {
+        // Before the first configure the surface may not be committed with a
+        // buffer, and an early frame request would never fire and wedge
+        // `frame_pending`. Happens when the app-wide tick hits a window that
+        // was just hotplugged.
+        if self.first_configure || self.frame_pending {
             return;
         }
         self.frame_pending = true;
@@ -241,8 +394,13 @@ impl Window {
         text_cx: &mut TextContext,
     ) {
         self.frame_pending = false;
-        let ctx = ctx!(self, compositor_state, qh, text_cx);
-        if self.handler.on_frame(ctx) {
+        let redraw = if self.raw.is_some() {
+            self.raw_callback(qh, |handler, ctx| handler.on_frame(ctx))
+        } else {
+            let ctx = ctx!(self, compositor_state, qh, text_cx);
+            self.handler.on_frame(ctx)
+        };
+        if redraw {
             self.request_frame(compositor_state, qh, text_cx);
         }
     }
@@ -253,10 +411,34 @@ impl Window {
         qh: &QueueHandle<App>,
         text_cx: &mut TextContext,
     ) {
-        let ctx = ctx!(self, compositor_state, qh, text_cx);
-        if self.handler.on_tick(ctx) {
+        let redraw = if self.raw.is_some() {
+            self.raw_callback(qh, |handler, ctx| handler.on_tick(ctx))
+        } else {
+            let ctx = ctx!(self, compositor_state, qh, text_cx);
+            self.handler.on_tick(ctx)
+        };
+        if redraw {
             self.request_frame(compositor_state, qh, text_cx);
         }
+    }
+
+    /// Invokes a [`RawSurfaceHandler`] callback with a fresh context. Returns
+    /// `false` when the GPU surface does not exist yet.
+    fn raw_callback(
+        &mut self,
+        qh: &QueueHandle<App>,
+        f: impl FnOnce(&mut dyn RawSurfaceHandler, crate::handler::RawSurfaceCtx<'_>) -> bool,
+    ) -> bool {
+        let scale = self.scale as f64;
+        let layer = &self.layer;
+        let Some(RawWindow {
+            handler,
+            renderer: Some(renderer),
+        }) = self.raw.as_mut()
+        else {
+            return false;
+        };
+        renderer.with_ctx(scale, layer, qh, |ctx| f(handler.as_mut(), ctx))
     }
 
     pub fn on_pointer_enter(
@@ -307,10 +489,15 @@ impl Window {
         qh: &QueueHandle<App>,
         text_cx: &mut TextContext,
     ) {
-        let ctx = ctx!(self, compositor_state, qh, text_cx);
-        if self.handler.on_pointer_press(x, y, ctx) {
-            self.request_frame(compositor_state, qh, text_cx);
-        }
+        self.on_pointer_button(
+            x,
+            y,
+            PointerButton::Left,
+            true,
+            compositor_state,
+            qh,
+            text_cx,
+        );
     }
 
     pub fn on_pointer_release(
@@ -321,8 +508,102 @@ impl Window {
         qh: &QueueHandle<App>,
         text_cx: &mut TextContext,
     ) {
+        self.on_pointer_button(
+            x,
+            y,
+            PointerButton::Left,
+            false,
+            compositor_state,
+            qh,
+            text_cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_pointer_button(
+        &mut self,
+        x: f64,
+        y: f64,
+        button: PointerButton,
+        pressed: bool,
+        compositor_state: &CompositorState,
+        qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
+    ) {
         let ctx = ctx!(self, compositor_state, qh, text_cx);
-        if self.handler.on_pointer_release(x, y, ctx) {
+        if self.handler.on_pointer_button(x, y, button, pressed, ctx) {
+            self.request_frame(compositor_state, qh, text_cx);
+        }
+    }
+
+    pub fn on_pointer_scroll(
+        &mut self,
+        x: f64,
+        y: f64,
+        delta: ScrollDelta,
+        compositor_state: &CompositorState,
+        qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
+    ) {
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
+        if self.handler.on_pointer_scroll(x, y, delta, ctx) {
+            self.request_frame(compositor_state, qh, text_cx);
+        }
+    }
+
+    /// Delivers a key event, pressed or released, to this window's handler.
+    pub(crate) fn on_key(
+        &mut self,
+        key: KeyPress<'_>,
+        pressed: bool,
+        compositor_state: &CompositorState,
+        qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
+    ) {
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
+        let redraw = if pressed {
+            self.handler.on_key_press(key, ctx)
+        } else {
+            self.handler.on_key_release(key, ctx)
+        };
+        if redraw {
+            self.request_frame(compositor_state, qh, text_cx);
+        }
+    }
+
+    pub fn on_modifiers(
+        &mut self,
+        mods: Modifiers,
+        compositor_state: &CompositorState,
+        qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
+    ) {
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
+        if self.handler.on_modifiers(mods, ctx) {
+            self.request_frame(compositor_state, qh, text_cx);
+        }
+    }
+
+    pub fn on_keyboard_enter(
+        &mut self,
+        compositor_state: &CompositorState,
+        qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
+    ) {
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
+        if self.handler.on_keyboard_enter(ctx) {
+            self.request_frame(compositor_state, qh, text_cx);
+        }
+    }
+
+    pub fn on_keyboard_leave(
+        &mut self,
+        compositor_state: &CompositorState,
+        qh: &QueueHandle<App>,
+        text_cx: &mut TextContext,
+    ) {
+        let ctx = ctx!(self, compositor_state, qh, text_cx);
+        if self.handler.on_keyboard_leave(ctx) {
             self.request_frame(compositor_state, qh, text_cx);
         }
     }

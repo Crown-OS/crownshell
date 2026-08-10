@@ -32,18 +32,37 @@
 //! [`SurfaceCtx::text`]: crate::SurfaceCtx::text
 
 use parley::{
-    FontContext, FontStack, FontStyle, FontWeight, LayoutContext, LineHeight, PositionedLayoutItem,
-    StyleProperty,
+    Affinity, Alignment, AlignmentOptions, FontContext, FontStack, FontStyle, FontWeight,
+    LayoutContext, LineHeight, PositionedLayoutItem, StyleProperty, layout::cursor::Cursor,
 };
 use vello::{
-    kurbo::{Affine, Diagonal2, Point, Size},
-    peniko::{Color, Fill},
     FontEmbolden, Glyph, Scene,
+    kurbo::{Affine, Diagonal2, Point, Rect, Size},
+    peniko::{Color, Fill},
 };
 
 /// Synthetic bold expansion, as a fraction of the font size in pixels. Only
 /// applied when the font family has no real bold face.
 const SYNTHETIC_BOLD_RATIO: f64 = 0.02;
+
+/// Width of the rectangle [`Text::caret`] reports, in logical pixels. A caret
+/// is a zero-width position between two clusters; giving it a hairline width
+/// means callers can fill the rect directly instead of inventing one.
+const CARET_WIDTH: f64 = 1.0;
+
+/// The character appended to text that a [`Text::set_max_lines`] clamp cut short.
+const ELLIPSIS: char = '…';
+
+/// Ceiling on the number of re-layouts [`Text::clamp_lines`] will spend fitting
+/// an ellipsis onto the last kept line.
+///
+/// One pass is normally enough. A pass can fail when the ellipsis is wider than
+/// the character it replaced and pushes the line over the wrap width again, and
+/// pathological styles (letter spacing wider than the wrap width) never
+/// converge at all, so the loop is bounded and falls back to an exact,
+/// ellipsis-free truncation. Every pass drops at least one more character, so
+/// the bound is only ever reached by such a style.
+const MAX_TRUNCATION_PASSES: usize = 8;
 
 /// The brush carried through a text layout.
 ///
@@ -156,6 +175,11 @@ pub struct TextStyle {
     pub line_height: f32,
     /// Extra spacing inserted after every glyph, in pixels.
     pub letter_spacing: f32,
+    /// How each line sits inside the wrap width set by [`Text::set_max_width`].
+    ///
+    /// Only observable once the text wraps: with no wrap width the container is
+    /// the layout's own width, so no line has any free space to be moved in.
+    pub alignment: Alignment,
 }
 
 impl Default for TextStyle {
@@ -168,6 +192,7 @@ impl Default for TextStyle {
             color: Color::WHITE,
             line_height: 1.2,
             letter_spacing: 0.0,
+            alignment: Alignment::Start,
         }
     }
 }
@@ -216,6 +241,11 @@ impl TextStyle {
         self.letter_spacing = letter_spacing;
         self
     }
+
+    pub fn with_alignment(mut self, alignment: Alignment) -> Self {
+        self.alignment = alignment;
+        self
+    }
 }
 
 /// A reusable piece of styled text with a cached layout.
@@ -230,11 +260,22 @@ impl TextStyle {
 /// [`scale`](TextContext::scale) so glyphs are rasterised at the display's true
 /// pixel density, but that never changes the size text reports or appears.
 ///
+/// Text is a single line by default. Give it a
+/// [`max_width`](Self::set_max_width) to wrap it into a column and a
+/// [`max_lines`](Self::set_max_lines) to clamp that column with an ellipsis.
+///
 /// [`SurfaceCtx::size`]: crate::SurfaceCtx::size
 pub struct Text {
     content: String,
     style: TextStyle,
     layout: TextLayout,
+    max_width: Option<f64>,
+    max_lines: Option<usize>,
+    /// The string the cached layout was actually built from: `content`, unless
+    /// a [`max_lines`](Self::set_max_lines) clamp shortened it to a prefix plus
+    /// an ellipsis. Held as a field so clamping reuses one allocation instead
+    /// of building a new `String` every time the text or the width changes.
+    display: String,
     /// The [`TextContext::scale`] the cached layout was built at.
     built_scale: f32,
     dirty: bool,
@@ -247,6 +288,9 @@ impl Text {
             content: content.into(),
             style: TextStyle::default(),
             layout: TextLayout::new(),
+            max_width: None,
+            max_lines: None,
+            display: String::new(),
             built_scale: 1.0,
             dirty: true,
         }
@@ -295,6 +339,67 @@ impl Text {
     pub fn style_mut(&mut self) -> &mut TextStyle {
         self.dirty = true;
         &mut self.style
+    }
+
+    /// The wrap width in logical pixels, or `None` when the text never wraps.
+    pub fn max_width(&self) -> Option<f64> {
+        self.max_width
+    }
+
+    /// Sets the wrap width, in **logical** pixels — the same space
+    /// [`size`](Self::size) reports in, so a caller can hand this the column
+    /// width it measured without thinking about the display's pixel density.
+    ///
+    /// `None`, the default, puts the whole content on one line however long it
+    /// is, which is what a label or a clock wants. Give it a width for anything
+    /// that has to fit a column, such as a notification body.
+    ///
+    /// Changing the width invalidates the cached layout; setting the width it
+    /// already has does not, so a handler can pass the same measurement every
+    /// frame without forcing a re-layout.
+    pub fn set_max_width(&mut self, max_width: Option<f64>) {
+        if self.max_width != max_width {
+            self.max_width = max_width;
+            self.dirty = true;
+        }
+    }
+
+    pub fn with_max_width(mut self, max_width: Option<f64>) -> Self {
+        self.set_max_width(max_width);
+        self
+    }
+
+    /// The line limit, or `None` when the text is not clamped.
+    pub fn max_lines(&self) -> Option<usize> {
+        self.max_lines
+    }
+
+    /// Limits the text to `max_lines` lines, ending the last one with an
+    /// ellipsis when content had to be dropped. `None` (the default) keeps
+    /// every line.
+    ///
+    /// [`text`](Self::text) still reports the full content — only what is laid
+    /// out and drawn is shortened — so the clamp can be raised or removed later
+    /// without the original having been lost.
+    ///
+    /// Usually paired with [`set_max_width`](Self::set_max_width), but it also
+    /// clamps text that is multi-line because it contains newlines.
+    pub fn set_max_lines(&mut self, max_lines: Option<usize>) {
+        if self.max_lines != max_lines {
+            self.max_lines = max_lines;
+            self.dirty = true;
+        }
+    }
+
+    pub fn with_max_lines(mut self, max_lines: Option<usize>) -> Self {
+        self.set_max_lines(max_lines);
+        self
+    }
+
+    /// The number of lines the text occupies, after wrapping and clamping.
+    pub fn line_count(&mut self, tcx: &mut TextContext) -> usize {
+        self.ensure_layout(tcx);
+        self.layout.len()
     }
 
     /// Returns the laid-out text, rebuilding it first if anything changed.
@@ -357,6 +462,50 @@ impl Text {
         draw_layout(scene, &self.layout, transform);
     }
 
+    /// The byte index of the character nearest `point`, which is in logical
+    /// pixels relative to the text's own top-left corner — the same origin
+    /// [`draw`](Self::draw) was given, so subtract that origin from a
+    /// surface-local pointer position before calling this.
+    ///
+    /// The result is always on a cluster boundary, so it is safe to slice
+    /// [`text`](Self::text) at. Points above or left of the text clamp to `0`
+    /// and points past the end clamp to the content length.
+    ///
+    /// Indices are into the text that was laid out. That is
+    /// [`text`](Self::text) unless a [`max_lines`](Self::set_max_lines) clamp
+    /// replaced its tail with an ellipsis, so do not mix caret editing with a
+    /// clamp on the same `Text`.
+    pub fn index_at(&mut self, tcx: &mut TextContext, point: impl Into<Point>) -> usize {
+        let point = point.into();
+        let scale = self.ensure_layout(tcx);
+        Cursor::from_point(
+            &self.layout,
+            (point.x * scale) as f32,
+            (point.y * scale) as f32,
+        )
+        .index()
+    }
+
+    /// The caret rectangle for a byte index, in logical pixels relative to the
+    /// text's top-left corner.
+    ///
+    /// The rect spans the full height of the line the caret is on and is
+    /// [`CARET_WIDTH`] wide, so it can be filled as-is. Indices that land
+    /// inside a multi-byte character or past the end snap to the nearest
+    /// cluster boundary rather than panicking, which keeps a caret driven by
+    /// byte arithmetic from ever splitting a grapheme.
+    pub fn caret(&mut self, tcx: &mut TextContext, index: usize) -> Rect {
+        let scale = self.ensure_layout(tcx);
+        let cursor = Cursor::from_byte_index(&self.layout, index, Affinity::Downstream);
+        let bounds = cursor.geometry(&self.layout, (CARET_WIDTH * scale) as f32);
+        Rect::new(
+            bounds.x0 / scale,
+            bounds.y0 / scale,
+            bounds.x1 / scale,
+            bounds.y1 / scale,
+        )
+    }
+
     /// Rebuilds the layout if needed and returns the scale it is built at.
     fn ensure_layout(&mut self, tcx: &mut TextContext) -> f64 {
         if self.dirty || self.built_scale != tcx.scale() {
@@ -366,6 +515,25 @@ impl Text {
     }
 
     fn rebuild(&mut self, tcx: &mut TextContext) {
+        let scale = tcx.scale();
+        // The wrap width is logical, but Parley breaks lines in the same space
+        // it shapes in, which is physical pixels at the context's scale.
+        let max_advance = self.max_width.map(|width| (width * scale as f64) as f32);
+
+        self.display.clear();
+        self.display.push_str(&self.content);
+        self.build_layout(tcx, max_advance);
+        if let Some(max_lines) = self.max_lines {
+            self.clamp_lines(tcx, max_advance, max_lines);
+        }
+
+        self.built_scale = scale;
+        self.dirty = false;
+    }
+
+    /// Lays `display` out into `layout`, breaking and aligning it to
+    /// `max_advance` (already in physical pixels).
+    fn build_layout(&mut self, tcx: &mut TextContext, max_advance: Option<f32>) {
         let TextContext {
             font_cx,
             layout_cx,
@@ -373,8 +541,9 @@ impl Text {
         } = tcx;
         let scale = *scale;
         let style = &self.style;
+        let alignment = style.alignment;
 
-        let mut builder = layout_cx.ranged_builder(font_cx, &self.content, scale, true);
+        let mut builder = layout_cx.ranged_builder(font_cx, &self.display, scale, true);
         builder.push_default(StyleProperty::FontStack(FontStack::from(
             style.family.as_str(),
         )));
@@ -390,13 +559,72 @@ impl Text {
         )));
         builder.push_default(StyleProperty::LetterSpacing(style.letter_spacing));
         builder.push_default(StyleProperty::Brush(ColorBrush(style.color)));
-        builder.build_into(&mut self.layout, &self.content);
+        builder.build_into(&mut self.layout, &self.display);
 
-        // No wrapping: this pass targets single-line text.
-        self.layout.break_all_lines(None);
-        self.built_scale = scale;
-        self.dirty = false;
+        self.layout.break_all_lines(max_advance);
+        self.layout
+            .align(max_advance, alignment, AlignmentOptions::default());
     }
+
+    /// Shortens `display` until its layout fits in `max_lines` lines, ending it
+    /// with an ellipsis.
+    ///
+    /// Parley 0.6 cannot truncate a layout in place, so the only honest way to
+    /// do this is to lay the text out, read where the last line we may keep
+    /// ends, and lay out a shortened copy — one that gives up a character to
+    /// make room for the ellipsis, because a line that was exactly full has no
+    /// room for one and would simply wrap it onto the line we just cut.
+    ///
+    /// That replacement can itself overflow, so this loops; see
+    /// [`MAX_TRUNCATION_PASSES`] for why the loop is bounded and why the
+    /// fallback is exact.
+    fn clamp_lines(&mut self, tcx: &mut TextContext, max_advance: Option<f32>, max_lines: usize) {
+        if max_lines == 0 {
+            self.display.clear();
+            self.build_layout(tcx, max_advance);
+            return;
+        }
+
+        for _ in 0..MAX_TRUNCATION_PASSES {
+            if self.layout.len() <= max_lines {
+                return;
+            }
+            let Some(keep) = self.last_kept_line_end(max_lines) else {
+                return;
+            };
+            self.display.truncate(keep);
+            trim_end(&mut self.display);
+            self.display.pop();
+            trim_end(&mut self.display);
+            self.display.push(ELLIPSIS);
+            self.build_layout(tcx, max_advance);
+        }
+
+        if self.layout.len() > max_lines {
+            // Drop the ellipsis rather than the clamp: the text of the first
+            // `max_lines` lines re-breaks into exactly those lines again, so
+            // this always terminates the clamp, it just cannot signal that
+            // something was cut.
+            if let Some(keep) = self.last_kept_line_end(max_lines) {
+                self.display.truncate(keep);
+                self.build_layout(tcx, max_advance);
+            }
+        }
+    }
+
+    /// Byte offset into `display` one past the end of line `max_lines - 1`.
+    fn last_kept_line_end(&self, max_lines: usize) -> Option<usize> {
+        self.layout
+            .get(max_lines - 1)
+            .map(|line| line.text_range().end)
+    }
+}
+
+/// Drops trailing whitespace in place, so the ellipsis sits against the text
+/// rather than after the space the line break consumed.
+fn trim_end(text: &mut String) {
+    let trimmed = text.trim_end().len();
+    text.truncate(trimmed);
 }
 
 /// Encodes an already-built Parley layout into a Vello scene under `transform`,
@@ -445,7 +673,7 @@ pub fn draw_layout(scene: &mut Scene, layout: &TextLayout, transform: Affine) {
                 .draw(
                     Fill::NonZero,
                     glyph_run.positioned_glyphs().map(|glyph| Glyph {
-                        id: glyph.id as u32,
+                        id: glyph.id,
                         x: glyph.x,
                         y: glyph.y,
                     }),
@@ -549,7 +777,10 @@ mod tests {
 
         // Logical origin lands on the right physical pixel.
         let t = run.transform.translation;
-        assert!((t[0] - 20.0).abs() < 1e-3 && (t[1] - 40.0).abs() < 1e-3, "{t:?}");
+        assert!(
+            (t[0] - 20.0).abs() < 1e-3 && (t[1] - 40.0).abs() < 1e-3,
+            "{t:?}"
+        );
 
         // And the run carries the physical ppem, not the logical one.
         assert!(
@@ -575,6 +806,332 @@ mod tests {
         let mut text = Text::new("Hello");
         let baseline = text.baseline(&mut tcx);
         assert!(baseline > 0.0 && baseline < text.height(&mut tcx));
+    }
+
+    /// How far alignment shifted the first line inside the wrap width.
+    fn first_line_offset(text: &mut Text, tcx: &mut TextContext) -> Option<f32> {
+        text.layout(tcx);
+        text.layout.get(0).map(|line| line.metrics().offset)
+    }
+
+    /// A body long enough to need several lines in any reasonable column.
+    const PARAGRAPH: &str =
+        "The quick brown fox jumps over the lazy dog while the compositor waits for a frame.";
+
+    #[test]
+    fn text_without_a_wrap_width_stays_on_one_line() {
+        let mut tcx = TextContext::new();
+        let mut text = Text::new(PARAGRAPH);
+
+        assert_eq!(text.max_width(), None, "wrapping must be opt-in");
+        assert_eq!(
+            text.line_count(&mut tcx),
+            1,
+            "unwrapped text laid out as {} lines",
+            text.line_count(&mut tcx)
+        );
+    }
+
+    #[test]
+    fn a_wrap_width_breaks_the_text_into_narrower_lines() {
+        let mut tcx = TextContext::new();
+
+        let mut unwrapped = Text::new(PARAGRAPH);
+        let natural = unwrapped.width(&mut tcx);
+
+        let mut wrapped = Text::new(PARAGRAPH).with_max_width(Some(140.0));
+        let lines = wrapped.line_count(&mut tcx);
+        let size = wrapped.size(&mut tcx);
+
+        assert!(lines > 1, "expected the text to wrap, got {lines} line(s)");
+        assert!(
+            size.width <= 140.0,
+            "wrapped width {} exceeds the 140.0 wrap width",
+            size.width
+        );
+        assert!(
+            size.width < natural,
+            "wrapped width {} is not narrower than the unwrapped {natural}",
+            size.width
+        );
+        assert!(
+            size.height > unwrapped.height(&mut tcx),
+            "wrapping to {lines} lines did not make the text taller: {}",
+            size.height
+        );
+    }
+
+    #[test]
+    fn changing_the_wrap_width_invalidates_the_layout() {
+        let mut tcx = TextContext::new();
+        let mut text = Text::new(PARAGRAPH);
+        text.layout(&mut tcx);
+
+        text.set_max_width(None);
+        assert!(!text.dirty, "setting the width it already had invalidated");
+
+        text.set_max_width(Some(140.0));
+        assert!(text.dirty, "a new wrap width must invalidate");
+
+        let narrow = text.line_count(&mut tcx);
+        text.set_max_width(Some(70.0));
+        let narrower = text.line_count(&mut tcx);
+        assert!(
+            narrower > narrow,
+            "halving the wrap width gave {narrower} lines, not more than {narrow}"
+        );
+    }
+
+    #[test]
+    fn max_lines_clamps_the_layout_and_marks_the_cut_with_an_ellipsis() {
+        let mut tcx = TextContext::new();
+        let mut text = Text::new(PARAGRAPH)
+            .with_max_width(Some(140.0))
+            .with_max_lines(Some(2));
+
+        let lines = text.line_count(&mut tcx);
+        assert_eq!(lines, 2, "expected the clamp to hold, got {lines} lines");
+        assert!(
+            text.display.ends_with(ELLIPSIS),
+            "clamped text did not end in an ellipsis: {:?}",
+            text.display
+        );
+        assert!(
+            text.display.len() < PARAGRAPH.len(),
+            "clamped text was not shortened: {:?}",
+            text.display
+        );
+        assert_eq!(
+            text.text(),
+            PARAGRAPH,
+            "the clamp must not destroy the content"
+        );
+    }
+
+    #[test]
+    fn max_lines_leaves_text_that_already_fits_alone() {
+        let mut tcx = TextContext::new();
+        let mut text = Text::new("Hello").with_max_lines(Some(4));
+
+        assert_eq!(text.line_count(&mut tcx), 1);
+        assert_eq!(
+            text.display, "Hello",
+            "unclamped text was rewritten to {:?}",
+            text.display
+        );
+    }
+
+    #[test]
+    fn max_lines_clamps_text_broken_by_newlines() {
+        let mut tcx = TextContext::new();
+        let mut text = Text::new("one\ntwo\nthree\nfour").with_max_lines(Some(2));
+
+        let lines = text.line_count(&mut tcx);
+        assert_eq!(lines, 2, "expected 2 lines, got {lines}");
+        assert!(
+            text.display.ends_with(ELLIPSIS),
+            "expected an ellipsis, got {:?}",
+            text.display
+        );
+    }
+
+    #[test]
+    fn a_zero_line_clamp_lays_out_nothing() {
+        let mut tcx = TextContext::new();
+        let mut text = Text::new(PARAGRAPH).with_max_lines(Some(0));
+
+        assert!(
+            text.display.is_empty(),
+            "expected empty display text, got {:?}",
+            text.display
+        );
+        assert_eq!(
+            text.width(&mut tcx),
+            0.0,
+            "expected zero width, got {}",
+            text.width(&mut tcx)
+        );
+    }
+
+    /// The wrap width is quoted in logical pixels, so raising the scale must
+    /// change only how finely the same lines are rasterised. Getting this wrong
+    /// re-wraps every notification body the moment it moves to a HiDPI output.
+    #[test]
+    fn the_wrap_width_is_logical_not_physical() {
+        let mut tcx = TextContext::new();
+        let mut text = Text::new(PARAGRAPH).with_max_width(Some(140.0));
+
+        let logical = text.size(&mut tcx);
+        let lines = text.line_count(&mut tcx);
+
+        tcx.set_scale(2.0);
+        let scaled = text.size(&mut tcx);
+        assert_eq!(text.built_scale, 2.0, "raising the scale re-lays out");
+
+        assert_eq!(
+            text.line_count(&mut tcx),
+            lines,
+            "line count moved from {lines} at scale 2.0"
+        );
+        assert!(
+            (scaled.width - logical.width).abs() < 2.0,
+            "logical width moved: {} -> {}",
+            logical.width,
+            scaled.width
+        );
+        assert!(
+            (scaled.height - logical.height).abs() < 2.0,
+            "logical height moved: {} -> {}",
+            logical.height,
+            scaled.height
+        );
+        assert!(
+            text.layout.width() as f64 > logical.width * 1.5,
+            "the physical layout did not grow with the scale: {}",
+            text.layout.width()
+        );
+        assert!(
+            text.layout.width() <= 140.0 * 2.0,
+            "the physical layout overflowed the doubled wrap width: {}",
+            text.layout.width()
+        );
+    }
+
+    #[test]
+    fn centring_moves_lines_without_changing_the_measured_width() {
+        let mut tcx = TextContext::new();
+        let style = TextStyle::default();
+
+        let mut start = Text::styled(PARAGRAPH, style.clone()).with_max_width(Some(140.0));
+        let mut centred = Text::styled(PARAGRAPH, style.with_alignment(Alignment::Center))
+            .with_max_width(Some(140.0));
+
+        assert_eq!(start.line_count(&mut tcx), centred.line_count(&mut tcx));
+        assert_eq!(
+            start.size(&mut tcx),
+            centred.size(&mut tcx),
+            "alignment must not change the measured size"
+        );
+
+        let start_offset = first_line_offset(&mut start, &mut tcx);
+        let centred_offset = first_line_offset(&mut centred, &mut tcx);
+        assert_eq!(
+            start_offset,
+            Some(0.0),
+            "start-aligned text was offset by {start_offset:?}"
+        );
+        assert!(
+            centred_offset.is_some_and(|offset| offset > 0.0),
+            "centring did not offset the first line: {centred_offset:?}"
+        );
+    }
+
+    #[test]
+    fn the_caret_walks_left_to_right_across_the_text() {
+        let mut tcx = TextContext::new();
+        let mut text = Text::new("Hello");
+
+        let start = text.caret(&mut tcx, 0);
+        let end = text.caret(&mut tcx, 5);
+        assert!(
+            start.x0 < end.x0,
+            "caret did not advance: {} -> {}",
+            start.x0,
+            end.x0
+        );
+        assert!(
+            end.height() > 0.0 && end.width() > 0.0,
+            "expected a fillable caret rect, got {end:?}"
+        );
+        assert!(
+            end.x1 <= text.width(&mut tcx) + 1.0,
+            "the end caret {} sits outside the text width {}",
+            end.x1,
+            text.width(&mut tcx)
+        );
+    }
+
+    #[test]
+    fn index_at_round_trips_with_caret_over_multi_byte_characters() {
+        let mut tcx = TextContext::new();
+        // "héllo wörld": é and ö are two bytes each, so byte indices and
+        // character counts diverge from index 2 onwards.
+        let content = "héllo wörld";
+        let mut text = Text::new(content);
+
+        for (index, _) in content.char_indices() {
+            let rect = text.caret(&mut tcx, index);
+            // A quarter of a pixel into the cluster that starts here, which is
+            // well inside its leading half for any readable font size.
+            let probe = (rect.x0 + 0.25, rect.center().y);
+            assert_eq!(
+                text.index_at(&mut tcx, probe),
+                index,
+                "probing just right of the caret for byte {index} of {content:?} \
+                 did not come back to it"
+            );
+        }
+
+        let end = text.caret(&mut tcx, content.len());
+        assert_eq!(
+            text.index_at(&mut tcx, (end.x0 - 0.25, end.center().y)),
+            content.len(),
+            "probing just left of the trailing caret did not report the end"
+        );
+    }
+
+    #[test]
+    fn a_caret_inside_a_multi_byte_character_snaps_to_its_start() {
+        let mut tcx = TextContext::new();
+        let mut text = Text::new("héllo");
+
+        // 'é' occupies bytes 1..3, so 2 is inside it.
+        assert_eq!(
+            text.caret(&mut tcx, 2),
+            text.caret(&mut tcx, 1),
+            "a mid-grapheme index did not snap to the grapheme start"
+        );
+    }
+
+    #[test]
+    fn index_at_clamps_to_the_ends_of_the_text() {
+        let mut tcx = TextContext::new();
+        let content = "Hello";
+        let mut text = Text::new(content);
+        let height = text.height(&mut tcx);
+
+        assert_eq!(
+            text.index_at(&mut tcx, (-1000.0, -1000.0)),
+            0,
+            "a point far above and left of the text did not clamp to 0"
+        );
+        assert_eq!(
+            text.index_at(&mut tcx, (1000.0, height * 2.0)),
+            content.len(),
+            "a point past the end did not clamp to the content length"
+        );
+    }
+
+    #[test]
+    fn carets_land_on_the_line_the_wrapped_text_put_them_on() {
+        let mut tcx = TextContext::new();
+        let mut text = Text::new(PARAGRAPH).with_max_width(Some(140.0));
+        assert!(text.line_count(&mut tcx) > 1);
+
+        let first = text.caret(&mut tcx, 0);
+        let last = text.caret(&mut tcx, PARAGRAPH.len());
+        assert!(
+            last.y0 > first.y0,
+            "the trailing caret stayed on the first line: {} vs {}",
+            last.y0,
+            first.y0
+        );
+        assert!(
+            last.y1 <= text.height(&mut tcx) + 1.0,
+            "the trailing caret {} fell outside the text height {}",
+            last.y1,
+            text.height(&mut tcx)
+        );
     }
 
     #[test]
