@@ -1,15 +1,18 @@
 pub mod animations;
 pub mod app;
+mod blit;
 mod blur;
 pub mod handler;
 pub mod predule;
 pub mod renderer;
+
+#[cfg(feature = "text")]
 pub mod text;
 pub mod window;
 
 mod wayland;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use calloop::EventLoop;
 use calloop_wayland_source::WaylandSource;
 
@@ -22,14 +25,14 @@ pub use handler::{
 pub use parley::Alignment;
 pub use renderer::Renderer;
 pub use smithay_client_toolkit::seat::keyboard::{Keysym, Modifiers};
-pub use text::{ColorBrush, Text, TextContext, TextLayout, TextStyle, draw_layout};
-pub use window::{DEFAULT_TICK_INTERVAL, Window, WindowConfig};
+pub use text::{draw_layout, ColorBrush, Text, TextContext, TextLayout, TextStyle};
+pub use window::{Window, WindowConfig, DEFAULT_TICK_INTERVAL};
 
 pub use calloop;
 pub use parley;
 pub use smithay_client_toolkit::output::OutputInfo;
 pub use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer};
-pub use vello::{self, Scene, kurbo, peniko, wgpu};
+pub use vello::{self, kurbo, peniko, wgpu, Scene};
 pub use wayland_client::{self, protocol::wl_output::WlOutput};
 
 pub fn run<F>(setup: F) -> Result<()>

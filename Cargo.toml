@@ -13,6 +13,12 @@ readme = "README.md"
 keywords = ["crownos", "wayland", "vello", "gui", "layershell"]
 categories = ["gui", "graphics", "rendering", "os::linux-apis"]
 
+[features]
+text = []
+crownos = []
+
+default = ["text"]
+
 [dependencies]
 anyhow = "1.0.102"
 battery = "0.7.8"

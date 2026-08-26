@@ -63,7 +63,7 @@ struct Params {
     step: [f32; 2],
     sigma: f32,
     radius: f32,
-    /// 0 = horizontal (premultiply on read), 1 = vertical (unpremultiply on write).
+    /// 0 = horizontal (premultiply on read), 1 = vertical.
     vertical: f32,
     _pad: [f32; 3],
 }
@@ -382,10 +382,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let offset = f32(i);
         let weight = exp(offset * offset * falloff);
         var texel = textureSampleLevel(src, src_sampler, in.uv + params.step * offset, 0.0);
-        // Vello writes straight alpha. Averaging that directly drags the colour
-        // of fully transparent texels into the result, so the horizontal pass
-        // premultiplies on the way in and the vertical pass undoes it on the
-        // way out; the scratch texture holds premultiplied values in between.
+        // Vello writes straight alpha, and averaging that drags the colour of
+        // fully transparent texels into the result, so the horizontal pass
+        // premultiplies on the way in. It stays premultiplied from there on:
+        // that is what the swapchain wants.
         if (horizontal) {
             texel = vec4<f32>(texel.rgb * texel.a, texel.a);
         }
@@ -393,15 +393,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         weight_sum = weight_sum + weight;
     }
 
-    var color = acc / weight_sum;
-    if (!horizontal) {
-        if (color.a > 0.0) {
-            color = vec4<f32>(color.rgb / color.a, color.a);
-        } else {
-            color = vec4<f32>(0.0);
-        }
-    }
-    return color;
+    return acc / weight_sum;
 }
 "#;
 

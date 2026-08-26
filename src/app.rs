@@ -1,21 +1,21 @@
 use calloop::{LoopHandle, RegistrationToken};
 use smithay_client_toolkit::{
     compositor::CompositorState,
-    data_device_manager::{DataDeviceManagerState, data_device::DataDevice, data_offer::DragOffer},
+    data_device_manager::{data_device::DataDevice, data_offer::DragOffer, DataDeviceManagerState},
     output::{OutputInfo, OutputState},
     registry::RegistryState,
     seat::{
-        SeatState,
         keyboard::{KeyEvent, Modifiers},
+        SeatState,
     },
-    shell::{WaylandSurface, wlr_layer::LayerShell},
+    shell::{wlr_layer::LayerShell, WaylandSurface},
 };
 use wayland_client::{
-    Connection, EventQueue, QueueHandle,
     globals::registry_queue_init,
     protocol::{
         wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer, wl_surface::WlSurface,
     },
+    Connection, EventQueue, QueueHandle,
 };
 
 use crate::{

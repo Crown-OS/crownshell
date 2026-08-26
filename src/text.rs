@@ -32,13 +32,13 @@
 //! [`SurfaceCtx::text`]: crate::SurfaceCtx::text
 
 use parley::{
-    Affinity, Alignment, AlignmentOptions, FontContext, FontStack, FontStyle, FontWeight,
-    LayoutContext, LineHeight, PositionedLayoutItem, StyleProperty, layout::cursor::Cursor,
+    layout::cursor::Cursor, Affinity, Alignment, AlignmentOptions, FontContext, FontStack,
+    FontStyle, FontWeight, LayoutContext, LineHeight, PositionedLayoutItem, StyleProperty,
 };
 use vello::{
-    FontEmbolden, Glyph, Scene,
     kurbo::{Affine, Diagonal2, Point, Rect, Size},
     peniko::{Color, Fill},
+    FontEmbolden, Glyph, Scene,
 };
 
 /// Synthetic bold expansion, as a fraction of the font size in pixels. Only

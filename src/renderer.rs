@@ -15,18 +15,16 @@ use wayland_client::{Connection, Proxy, QueueHandle};
 
 use crate::{
     app::App,
+    blit::PremulBlit,
     blur::{self, Blur},
     handler::{RawSurfaceCtx, RawSurfaceHandler},
     window::Window,
 };
 
-/// Compositor alpha modes that interpret the buffer as straight
-/// (un-premultiplied) alpha, in order of preference.
-const STRAIGHT_ALPHA_MODES: [CompositeAlphaMode; 3] = [
-    CompositeAlphaMode::PostMultiplied,
-    CompositeAlphaMode::Inherit,
-    CompositeAlphaMode::PreMultiplied,
-];
+/// Compositor alpha modes that interpret the buffer as premultiplied alpha,
+/// which is what Wayland mandates, in order of preference.
+const PREMULTIPLIED_ALPHA_MODES: [CompositeAlphaMode; 2] =
+    [CompositeAlphaMode::PreMultiplied, CompositeAlphaMode::Inherit];
 
 fn wayland_surface_target(
     connection: &Connection,
@@ -54,6 +52,7 @@ pub struct Renderer {
     surface: RenderSurface<'static>,
     /// Post-process blur, built on the first frame that actually asks for it.
     blur: Option<Blur>,
+    premul: PremulBlit,
 }
 
 impl Renderer {
@@ -81,11 +80,9 @@ impl Renderer {
             .surface
             .get_capabilities(context.devices[surface.dev_id].adapter())
             .alpha_modes;
-        // Vello's fine shader writes straight (un-premultiplied) alpha to the
-        // render target (fine.wgsl divides rgb by alpha before textureStore),
-        // so the compositor must be told to interpret the surface as straight
-        // alpha — otherwise even tiny alpha values clamp to fully-lit RGB.
-        let alpha_mode = STRAIGHT_ALPHA_MODES
+        // Vello writes straight alpha into its own target; the final pass into
+        // the swapchain premultiplies it, so the surface is honest premultiplied.
+        let alpha_mode = PREMULTIPLIED_ALPHA_MODES
             .into_iter()
             .find(|m| alpha_caps.contains(m))
             .unwrap_or(CompositeAlphaMode::Auto);
@@ -104,11 +101,14 @@ impl Renderer {
         )
         .map_err(|e| anyhow!("Renderer::new: {e}"))?;
 
+        let premul = PremulBlit::new(device, surface.config.format);
+
         Ok(Self {
             context,
             renderer,
             surface,
             blur: None,
+            premul,
         })
     }
 
@@ -121,10 +121,11 @@ impl Renderer {
         }
         self.context
             .resize_surface(&mut self.surface, width, height);
-        // Resizing replaces the target texture the blur samples from.
+        // Resizing replaces the target texture both passes sample from.
         if let Some(blur) = self.blur.as_mut() {
             blur.invalidate();
         }
+        self.premul.invalidate();
     }
 
     pub fn surface_size(&self) -> (u32, u32) {
@@ -178,7 +179,7 @@ impl Renderer {
                 blur_sigma,
             );
         } else {
-            self.surface.blitter.copy(
+            self.premul.record(
                 &device_handle.device,
                 &mut encoder,
                 &self.surface.target_view,
@@ -256,7 +257,7 @@ impl RawRenderer {
                 .or_else(|| caps.formats.first().copied())
                 .ok_or_else(|| anyhow!("surface reports no texture formats"))?;
 
-            let alpha_mode = STRAIGHT_ALPHA_MODES
+            let alpha_mode = PREMULTIPLIED_ALPHA_MODES
                 .into_iter()
                 .find(|m| caps.alpha_modes.contains(m))
                 .unwrap_or(CompositeAlphaMode::Auto);
