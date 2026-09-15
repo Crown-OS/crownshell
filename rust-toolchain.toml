@@ -1,0 +1,9 @@
+# Pinned so every contributor and CI compile with the same rustc.
+#
+# 1.88 is the real floor: vello 0.9 and xilem 0.4 both declare rust-version
+# 1.88, and wgpu 29 / zbus 5.16 declare 1.87. The 1.85 that crownshell used to
+# declare was wrong -- edition 2024 needs 1.85, but the dependency graph needs
+# more than the edition does.
+[toolchain]
+channel = "1.88.0"
+components = ["rustfmt", "clippy"]

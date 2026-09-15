@@ -1,1 +1,7 @@
 /target
+
+# Nix: `nix build` result symlinks and direnv's cache. The project ships a
+# flake and is developed on NixOS, so these appear in every checkout.
+/result
+/result-*
+.direnv/

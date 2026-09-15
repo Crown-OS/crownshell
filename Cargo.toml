@@ -1,8 +1,8 @@
 [package]
 name = "crownshell"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["marvelxcodes <ramakrishnan0046@gmail.com>"]
 description = "A Rust framework for building Wayland layer shell surfaces with Vello 2D graphics."
 license = "MIT"
@@ -14,12 +14,8 @@ keywords = ["crownos", "wayland", "vello", "gui", "layershell"]
 categories = ["gui", "graphics", "rendering", "os::linux-apis"]
 
 [dependencies]
-anyhow = "1.0.102"
-battery = "0.7.8"
-chrono = "0.4.45"
-tracing = "0.1.44"
+anyhow = "1.0.104"
 log = "0.4"
-env_logger = "0.11"
 
 smithay-client-toolkit = { version = "0.19", features = ["calloop"] }
 wayland-client = "0.31"
@@ -32,7 +28,12 @@ vello = "0.9.0"
 parley = "0.6"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
-bluer = { version = "0.17.4", features = ["bluetoothd", "id", "rfcomm"] }
+
+# Used only by examples/. Declaring them as normal dependencies made every
+# consumer of crownshell link them.
+[dev-dependencies]
+chrono = "0.4.45"
+env_logger = "0.11"
 
 [profile.release]
 lto = "thin"

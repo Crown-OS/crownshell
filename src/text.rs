@@ -10,7 +10,7 @@
 //! because crownshell only repaints on demand.
 //!
 //! ```no_run
-//! use crownshell::predule::*;
+//! use crownshell::prelude::*;
 //!
 //! struct Bar {
 //!     clock: Text,

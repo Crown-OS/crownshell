@@ -2,7 +2,7 @@
 //!
 //! Run with `cargo run --example text_bar` under a wlr-layer-shell compositor.
 
-use crownshell::predule::*;
+use crownshell::prelude::*;
 use vello::kurbo::RoundedRect;
 use vello::peniko::Fill;
 

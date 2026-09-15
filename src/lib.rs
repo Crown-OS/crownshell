@@ -2,7 +2,21 @@ pub mod animations;
 pub mod app;
 mod blur;
 pub mod handler;
-pub mod predule;
+pub mod prelude;
+
+/// Misspelling of [`prelude`], kept so 0.1 and 0.2 code still compiles.
+///
+/// 0.1.0 and 0.2.0 both shipped `predule`, so removing it outright would break
+/// every existing consumer. 0.3.0 is a breaking release and therefore the last
+/// cheap moment to introduce the correct spelling; this alias is scheduled for
+/// removal in 0.4.0.
+#[deprecated(
+    since = "0.3.0",
+    note = "spelled `prelude`; `predule` goes away in 0.4.0"
+)]
+pub mod predule {
+    pub use crate::prelude::*;
+}
 pub mod renderer;
 pub mod text;
 pub mod window;

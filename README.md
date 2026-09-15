@@ -20,17 +20,54 @@ This crate abstracts the Wayland boilerplate. Just configure the surface you wan
 
 - A Wayland compositor that supports `wlr-layer-shell` (Hyprland, Sway, KWin, River, and most wlroots-based compositors).
 
+## Native prerequisites
+
+`crownshell` links more than Wayland. `bluer` needs libdbus and the BlueZ headers, and `battery` reads through libdbus too — both are unconditional dependencies, not feature-gated, so you need them even for a surface that draws nothing but a clock. Vello needs a Vulkan loader and Mesa; text needs fontconfig.
+
+Arch:
+
+```bash
+sudo pacman -S --needed base-devel pkgconf \
+  wayland wayland-protocols libxkbcommon \
+  vulkan-icd-loader mesa libglvnd fontconfig \
+  dbus bluez bluez-libs
+```
+
+Debian/Ubuntu equivalents and the full list: [Prerequisites](https://github.com/Crown-OS/crownos-documentations/blob/main/docs/10-getting-started/prerequisites.md). Or run [`crownos-setup`](https://github.com/Crown-OS/crownos-setup)'s `./bootstrap.sh --check`, which installs them for you.
+
 ## Add it to your project
 
 ```toml
 [dependencies]
-crownshell = "0.1.0"
+crownshell = "0.3"
+```
+
+Requires Rust **1.88** or newer. Edition 2024 needs only 1.85, but `vello 0.9`
+declares `rust-version = "1.88"` and the dependency graph wins.
+
+To develop against a local checkout instead of the release, do not edit this
+dependency — put the override in `.cargo/config.toml` **above** your checkouts,
+where nothing tracks it:
+
+```toml
+# ~/src/crownos/.cargo/config.toml
+[patch.crates-io]
+crownshell = { path = "crownshell" }
+```
+
+`crownos-setup`'s `bootstrap.sh --dev` writes that file for you. It matters more than it looks: crates.io has only `crownshell` 0.1.0 and 0.2.0, so `crownshell = "0.3"` resolves *only* through that patch.
+
+Building the checkout itself:
+
+```bash
+cargo build
+cargo test
 ```
 
 ## A minimal example
 
 ```rust
-use crownshell::predule::*;
+use crownshell::prelude::*;
 use vello::kurbo::{Rect, RoundedRect};
 use vello::peniko::{Color, Fill};
 
@@ -90,7 +127,7 @@ Text is shaped and laid out with [Parley](https://github.com/linebender/parley) 
 A `Text` is a retained object: build it once, keep it on your handler, and update its content each frame. The layout is cached and only rebuilt when the content, style or scale actually changes, which matters because crownshell only repaints on demand.
 
 ```rust
-use crownshell::predule::*;
+use crownshell::prelude::*;
 
 struct Bar {
     clock: Text,
@@ -180,6 +217,28 @@ The pattern it uses:
 ## Status
 
 This is early crate, built to power layershell on my own distro (CrownOS). The API will move. If you're going to use it, expect breaking changes.
+
+Known limitations, all documented above: text is single-line with no wrapping or alignment; only integer buffer scales are supported, so `wp_fractional_scale_v1` fractional scaling is approximated; and blur depends on the compositor advertising `ext-background-effect-v1` — which crownpositor does not yet do, so under CrownOS itself the frosted look is silently absent.
+
+The `prelude` module is spelled that way — it's a typo in the public API that every downstream crate now uses. Fixing it is a breaking change, so it stands for now.
+
+`bluer`, `battery` and `tracing` are declared dependencies that nothing in `src/` or `examples/` uses. They're leftovers from when crownbar's code lived here. `bluer` in particular means you need libdbus and BlueZ present to link.
+
+## Who uses it
+
+Within [CrownOS](https://github.com/Crown-OS): [crownbar](https://github.com/Crown-OS/crownbar) (status bar), [crowndock](https://github.com/Crown-OS/crowndock) (dock), [crownotify](https://github.com/Crown-OS/crownotify) (notification daemon) and [crowndictator](https://github.com/Crown-OS/crowndictator) (voice dictation overlay).
+
+You do not need CrownOS to use crownshell, or to develop against it — any wlr-layer-shell compositor will do.
+
+## Contributing
+
+See the organization-wide [contribution guide](https://github.com/Crown-OS/crownos-documentations/blob/main/CONTRIBUTING.md), and [The layer-shell stack](https://github.com/Crown-OS/crownos-documentations/blob/main/docs/20-architecture/layer-shell-stack.md) for how the framework fits into the wider desktop.
+
+The default branch here is **`main`**.
+
+```
+cargo test    # 42 unit tests
+```
 
 ## License
 

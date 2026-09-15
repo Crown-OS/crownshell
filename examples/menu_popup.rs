@@ -47,7 +47,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crownshell::predule::*;
+use crownshell::prelude::*;
 use vello::{
     kurbo::{Affine, RoundedRect, Stroke},
     peniko::{Fill, Mix},
