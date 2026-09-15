@@ -1,10 +1,13 @@
+# Disarmed. This repository is archived and its code ships from the CrownOS
+# workspace now, so a v* tag pushed here would publish a frozen snapshot to
+# crates.io under a name that is still live. Publishing happens from
+# Crown-OS/crownOs.
 # Publish to crates.io on a v* tag. Logic lives in Crown-OS/.github.
 # See docs/40-contributing/releasing.md for the publish order.
 name: Publish
 
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
 
 jobs:
   publish:

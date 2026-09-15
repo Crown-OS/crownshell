@@ -1,9 +1,15 @@
+# This repository is archived: the code lives in Crown-OS/crownOs, where the
+# whole workspace is built and tested on every push. Running it here as well
+# would test a frozen snapshot -- and for the crates that depend on crownshell
+# by version, it cannot even resolve, because crownshell is not on crates.io.
+# That is what the old `siblings` input worked around, and the workspace removed
+# the need for it.
+#
+# Left manually triggerable rather than deleted, so the file still shows what CI
+# looked like here. Archiving the repository stops it for good.
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 jobs:
